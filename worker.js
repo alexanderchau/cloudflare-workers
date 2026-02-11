@@ -22,6 +22,8 @@ export default {
           return handleGetArchive(env, corsHeaders);
         case '/comments':
           return handleGetComments(env, corsHeaders);
+        case '/votes':
+          return handleGetVotes(env, corsHeaders);
         default:
           return new Response(JSON.stringify({ error: 'Not found' }), {
             status: 404,
@@ -44,6 +46,8 @@ export default {
         return handleSetArchive(request, env, corsHeaders);
       case '/comments':
         return handleAddComment(request, env, corsHeaders);
+      case '/votes':
+        return handleSetVotes(request, env, corsHeaders);
       default:
         return new Response(JSON.stringify({ error: 'Not found' }), {
           status: 404,
@@ -239,6 +243,54 @@ async function handleAddComment(request, env, corsHeaders) {
 
   return new Response(
     JSON.stringify({ success: true, comments: comments[sanitizedPropertyId] }),
+    { headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+  );
+}
+
+// Get all votes: { userId: { name, color, votes: [propertyId, ...] } }
+async function handleGetVotes(env, corsHeaders) {
+  const data = await env.ARCHIVE_STATE.get('cyprus-villas-votes', 'json');
+  return new Response(
+    JSON.stringify(data || {}),
+    { headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+  );
+}
+
+// Set votes for a user (replaces their votes)
+async function handleSetVotes(request, env, corsHeaders) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return new Response(
+      JSON.stringify({ error: 'Invalid JSON body' }),
+      { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+    );
+  }
+
+  const { userId, name, color, votes } = body;
+
+  if (!userId || !name || !Array.isArray(votes)) {
+    return new Response(
+      JSON.stringify({ error: 'Missing required fields: userId, name, votes[]' }),
+      { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+    );
+  }
+
+  // Sanitize: max 3 votes per user, strings only
+  const sanitizedVotes = votes.filter(id => typeof id === 'string').slice(0, 3);
+
+  const allVotes = await env.ARCHIVE_STATE.get('cyprus-villas-votes', 'json') || {};
+  allVotes[String(userId).slice(0, 100)] = {
+    name: String(name).slice(0, 50),
+    color: String(color || '#717171').slice(0, 20),
+    votes: sanitizedVotes,
+  };
+
+  await env.ARCHIVE_STATE.put('cyprus-villas-votes', JSON.stringify(allVotes));
+
+  return new Response(
+    JSON.stringify({ success: true, votes: allVotes }),
     { headers: { 'Content-Type': 'application/json', ...corsHeaders } }
   );
 }
