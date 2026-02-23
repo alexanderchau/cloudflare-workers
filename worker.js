@@ -14,16 +14,19 @@ export default {
     // Route by path
     const url = new URL(request.url);
     const path = url.pathname;
+    const trip = url.searchParams.get('trip') || '';
 
     // GET routes
     if (request.method === 'GET') {
       switch (path) {
         case '/archive':
-          return handleGetArchive(env, corsHeaders);
+          return handleGetArchive(env, corsHeaders, trip);
         case '/comments':
-          return handleGetComments(env, corsHeaders);
+          return handleGetComments(env, corsHeaders, trip);
         case '/votes':
-          return handleGetVotes(env, corsHeaders);
+          return handleGetVotes(env, corsHeaders, trip);
+        case '/trips':
+          return handleGetTrips(env, corsHeaders);
         default:
           return new Response(JSON.stringify({ error: 'Not found' }), {
             status: 404,
@@ -43,11 +46,13 @@ export default {
       case '/create-issue':
         return handleCreateIssue(request, env, corsHeaders);
       case '/archive':
-        return handleSetArchive(request, env, corsHeaders);
+        return handleSetArchive(request, env, corsHeaders, trip);
       case '/comments':
-        return handleAddComment(request, env, corsHeaders);
+        return handleAddComment(request, env, corsHeaders, trip);
       case '/votes':
-        return handleSetVotes(request, env, corsHeaders);
+        return handleSetVotes(request, env, corsHeaders, trip);
+      case '/trips':
+        return handleSetTrips(request, env, corsHeaders);
       default:
         return new Response(JSON.stringify({ error: 'Not found' }), {
           status: 404,
@@ -145,17 +150,34 @@ async function handleCreateIssue(request, env, corsHeaders) {
   }
 }
 
+// KV key helper: trip-scoped keys with fallback to bare keys for migration
+function kvKey(base, trip) {
+  return trip ? `${trip}:${base}` : base;
+}
+
+async function kvGetWithFallback(env, base, trip, defaultVal) {
+  const scopedKey = kvKey(base, trip);
+  let data = await env.ARCHIVE_STATE.get(scopedKey, 'json');
+  if (data !== null) return data;
+  // Fallback: read bare key (migration for pre-trip data)
+  if (trip) {
+    data = await env.ARCHIVE_STATE.get(base, 'json');
+    if (data !== null) return data;
+  }
+  return defaultVal;
+}
+
 // Get archived property IDs
-async function handleGetArchive(env, corsHeaders) {
-  const data = await env.ARCHIVE_STATE.get('cyprus-villas-archived', 'json');
+async function handleGetArchive(env, corsHeaders, trip) {
+  const data = await kvGetWithFallback(env, 'cyprus-villas-archived', trip, []);
   return new Response(
-    JSON.stringify(data || []),
+    JSON.stringify(data),
     { headers: { 'Content-Type': 'application/json', ...corsHeaders } }
   );
 }
 
 // Set archived property IDs
-async function handleSetArchive(request, env, corsHeaders) {
+async function handleSetArchive(request, env, corsHeaders, trip) {
   let body;
   try {
     body = await request.json();
@@ -175,7 +197,7 @@ async function handleSetArchive(request, env, corsHeaders) {
 
   // Sanitize: only allow strings, max 100 items
   const sanitized = body.filter(id => typeof id === 'string').slice(0, 100);
-  await env.ARCHIVE_STATE.put('cyprus-villas-archived', JSON.stringify(sanitized));
+  await env.ARCHIVE_STATE.put(kvKey('cyprus-villas-archived', trip), JSON.stringify(sanitized));
 
   return new Response(
     JSON.stringify({ success: true, archived: sanitized }),
@@ -184,16 +206,16 @@ async function handleSetArchive(request, env, corsHeaders) {
 }
 
 // Get all comments
-async function handleGetComments(env, corsHeaders) {
-  const data = await env.ARCHIVE_STATE.get('cyprus-villas-comments', 'json');
+async function handleGetComments(env, corsHeaders, trip) {
+  const data = await kvGetWithFallback(env, 'cyprus-villas-comments', trip, {});
   return new Response(
-    JSON.stringify(data || {}),
+    JSON.stringify(data),
     { headers: { 'Content-Type': 'application/json', ...corsHeaders } }
   );
 }
 
 // Add a comment to a property
-async function handleAddComment(request, env, corsHeaders) {
+async function handleAddComment(request, env, corsHeaders, trip) {
   let body;
   try {
     body = await request.json();
@@ -219,8 +241,9 @@ async function handleAddComment(request, env, corsHeaders) {
   const sanitizedColor = String(color || '#717171').slice(0, 20);
   const sanitizedPropertyId = String(propertyId).slice(0, 100);
 
-  // Load existing comments
-  const comments = await env.ARCHIVE_STATE.get('cyprus-villas-comments', 'json') || {};
+  // Load existing comments (trip-scoped)
+  const key = kvKey('cyprus-villas-comments', trip);
+  const comments = await kvGetWithFallback(env, 'cyprus-villas-comments', trip, {});
 
   // Add new comment
   if (!comments[sanitizedPropertyId]) {
@@ -239,7 +262,7 @@ async function handleAddComment(request, env, corsHeaders) {
     comments[sanitizedPropertyId] = comments[sanitizedPropertyId].slice(-50);
   }
 
-  await env.ARCHIVE_STATE.put('cyprus-villas-comments', JSON.stringify(comments));
+  await env.ARCHIVE_STATE.put(key, JSON.stringify(comments));
 
   return new Response(
     JSON.stringify({ success: true, comments: comments[sanitizedPropertyId] }),
@@ -248,16 +271,16 @@ async function handleAddComment(request, env, corsHeaders) {
 }
 
 // Get all votes: { userId: { name, color, votes: [propertyId, ...] } }
-async function handleGetVotes(env, corsHeaders) {
-  const data = await env.ARCHIVE_STATE.get('cyprus-villas-votes', 'json');
+async function handleGetVotes(env, corsHeaders, trip) {
+  const data = await kvGetWithFallback(env, 'cyprus-villas-votes', trip, {});
   return new Response(
-    JSON.stringify(data || {}),
+    JSON.stringify(data),
     { headers: { 'Content-Type': 'application/json', ...corsHeaders } }
   );
 }
 
 // Set votes for a user (replaces their votes)
-async function handleSetVotes(request, env, corsHeaders) {
+async function handleSetVotes(request, env, corsHeaders, trip) {
   let body;
   try {
     body = await request.json();
@@ -280,17 +303,61 @@ async function handleSetVotes(request, env, corsHeaders) {
   // Sanitize: max 3 votes per user, strings only
   const sanitizedVotes = votes.filter(id => typeof id === 'string').slice(0, 3);
 
-  const allVotes = await env.ARCHIVE_STATE.get('cyprus-villas-votes', 'json') || {};
+  const key = kvKey('cyprus-villas-votes', trip);
+  const allVotes = await kvGetWithFallback(env, 'cyprus-villas-votes', trip, {});
   allVotes[String(userId).slice(0, 100)] = {
     name: String(name).slice(0, 50),
     color: String(color || '#717171').slice(0, 20),
     votes: sanitizedVotes,
   };
 
-  await env.ARCHIVE_STATE.put('cyprus-villas-votes', JSON.stringify(allVotes));
+  await env.ARCHIVE_STATE.put(key, JSON.stringify(allVotes));
 
   return new Response(
     JSON.stringify({ success: true, votes: allVotes }),
+    { headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+  );
+}
+
+// Get trips list
+async function handleGetTrips(env, corsHeaders) {
+  const data = await env.ARCHIVE_STATE.get('cyprus-villas-trips', 'json');
+  return new Response(
+    JSON.stringify(data || []),
+    { headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+  );
+}
+
+// Save trips list
+async function handleSetTrips(request, env, corsHeaders) {
+  let body;
+  try {
+    body = await request.json();
+  } catch {
+    return new Response(
+      JSON.stringify({ error: 'Invalid JSON body' }),
+      { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+    );
+  }
+
+  if (!Array.isArray(body)) {
+    return new Response(
+      JSON.stringify({ error: 'Body must be an array of trip objects' }),
+      { status: 400, headers: { 'Content-Type': 'application/json', ...corsHeaders } }
+    );
+  }
+
+  // Sanitize: max 20 trips, validate shape
+  const sanitized = body.slice(0, 20).map(t => ({
+    id: String(t.id || '').slice(0, 100),
+    name: String(t.name || '').slice(0, 100),
+    createdAt: Number(t.createdAt) || Date.now(),
+  })).filter(t => t.id && t.name);
+
+  await env.ARCHIVE_STATE.put('cyprus-villas-trips', JSON.stringify(sanitized));
+
+  return new Response(
+    JSON.stringify({ success: true, trips: sanitized }),
     { headers: { 'Content-Type': 'application/json', ...corsHeaders } }
   );
 }
