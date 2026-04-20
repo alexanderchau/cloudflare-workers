@@ -2,5 +2,9 @@ name = "alex-api"
 main = "worker.js"
 compatibility_date = "2024-01-01"
 
+[[kv_namespaces]]
+binding = "ARCHIVE_STATE"
+id = "c05dcdd1d2e349ae9dac87aa19696e01"
+
 [vars]
 # GITHUB_TOKEN is set via `wrangler secret put GITHUB_TOKEN`
